@@ -1,0 +1,318 @@
+// Penny Coach — Prisma schema
+//
+// Provider: PostgreSQL (Neon / Supabase / Vercel Postgres, all free-tier).
+// The actual connection string lives in `.env` (local) or Vercel env vars
+// (prod) under DATABASE_URL. For local SQLite dev, switch provider back to
+// "sqlite" and set DATABASE_URL="file:./dev.db".
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Core identity ----------
+
+model User {
+  id        String   @id @default(cuid())
+  email     String?  @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  profile         FinancialProfile?
+  transactions    Transaction[]
+  categories      Category[]
+  budgets         Budget[]
+  futurePlans     FuturePlan[]
+  recurringBills  RecurringBill[]
+  goals           Goal[]
+  snapshots       MonthlySnapshot[]
+  recommendations Recommendation[]
+  notifications   Notification[]
+  tags            Tag[]
+  importBatches   ImportBatch[]
+}
+
+model FinancialProfile {
+  id                      String   @id @default(cuid())
+  userId                  String   @unique
+  user                    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  currency                String   @default("USD")
+  locale                  String   @default("en-US")
+  // Income in paise (smallest unit), to avoid float errors
+  monthlyIncome           Int      @default(0)
+  salaryCycle             String   @default("MONTHLY") // MONTHLY | WEEKLY | IRREGULAR
+  savingsTargetPct        Int      @default(20) // % of income
+  emergencyFundTargetMos  Int      @default(6)  // target in months of expenses
+  emergencyFundCurrent    Int      @default(0)  // paise
+  fixedExpensesNote       String?
+  onboardedAt             DateTime?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+}
+
+// ---------- Categories ----------
+
+model Category {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  slug      String   // e.g. "rent", "groceries"
+  name      String
+  // FIXED | VARIABLE | SAVINGS | INCOME
+  kind      String   @default("VARIABLE")
+  icon      String?
+  color     String?
+  isDefault Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions   Transaction[]
+  budgets        Budget[]
+  recurringBills RecurringBill[]
+  plans          FuturePlan[]
+
+  @@unique([userId, slug])
+  @@index([userId])
+}
+
+// ---------- Tags ----------
+
+model Tag {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now())
+
+  transactions TransactionTag[]
+
+  @@unique([userId, name])
+}
+
+model TransactionTag {
+  transactionId String
+  tagId         String
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  tag           Tag         @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([transactionId, tagId])
+}
+
+// ---------- Transactions ----------
+
+model Transaction {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  categoryId      String?
+  category        Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  // EXPENSE | INCOME | TRANSFER
+  type            String
+  // Amount in paise (always positive; sign is implied by type)
+  amountPaise     Int
+  date            DateTime
+  note            String?
+  merchant        String?
+  // DEBIT_CARD | CREDIT_CARD | CASH | CHECK | ACH | AUTOPAY | OTHER
+  paymentMethod   String?
+  isRecurring     Boolean  @default(false)
+  recurringBillId String?
+  recurringBill   RecurringBill? @relation(fields: [recurringBillId], references: [id], onDelete: SetNull)
+  // Used to group transactions that came in via the same import (CSV/OFX file)
+  // or the demo-data loader. Useful to undo an import and to isolate demo
+  // data from real data. Null for manually-entered transactions.
+  importBatchId   String?
+  importBatch     ImportBatch? @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  // External id from the bank export (FITID in OFX, "Transaction ID" in CSVs).
+  // Used to prevent double-import of the same transaction.
+  externalId      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tags TransactionTag[]
+
+  @@index([userId, date])
+  @@index([userId, categoryId])
+  @@index([userId, type])
+  @@index([userId, importBatchId])
+  @@unique([userId, externalId])
+}
+
+// ---------- Budgets ----------
+
+model Budget {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  categoryId    String
+  category      Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  // Period represented as the first day of the month (UTC 00:00)
+  periodMonth   DateTime
+  amountPaise   Int
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([userId, categoryId, periodMonth])
+  @@index([userId, periodMonth])
+}
+
+// ---------- Future Plans ----------
+
+model FuturePlan {
+  id                    String   @id @default(cuid())
+  userId                String
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                  String
+  targetAmountPaise     Int
+  savedAmountPaise      Int      @default(0)
+  targetDate            DateTime
+  // 1 = highest, 5 = lowest
+  priority              Int      @default(3)
+  categoryId            String?
+  category              Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  notes                 String?
+  // ACTIVE | PAUSED | DONE | ABANDONED
+  status                String   @default("ACTIVE")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([userId, status])
+}
+
+// ---------- Recurring Bills ----------
+
+model RecurringBill {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name          String
+  categoryId    String?
+  category      Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  amountPaise   Int
+  // MONTHLY | QUARTERLY | YEARLY | WEEKLY
+  frequency     String   @default("MONTHLY")
+  dayOfMonth    Int?     // for MONTHLY/QUARTERLY/YEARLY
+  nextDueDate   DateTime
+  // EXPENSE | INCOME
+  type          String   @default("EXPENSE")
+  autoPay       Boolean  @default(false)
+  active        Boolean  @default(true)
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  transactions  Transaction[]
+
+  @@index([userId, active])
+}
+
+// ---------- Goals (long-term; complementary to plans) ----------
+
+model Goal {
+  id                 String   @id @default(cuid())
+  userId             String
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name               String
+  targetAmountPaise  Int
+  savedAmountPaise   Int      @default(0)
+  targetDate         DateTime?
+  notes              String?
+  status             String   @default("ACTIVE") // ACTIVE | PAUSED | DONE
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([userId, status])
+}
+
+// ---------- Monthly snapshot (derived) ----------
+
+model MonthlySnapshot {
+  id                  String   @id @default(cuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  periodMonth         DateTime
+  incomePaise         Int      @default(0)
+  expensePaise        Int      @default(0)
+  fixedExpensePaise   Int      @default(0)
+  variableExpensePaise Int     @default(0)
+  savingsPaise        Int      @default(0)
+  topCategoryId       String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([userId, periodMonth])
+}
+
+// ---------- Recommendations (AdviceLog) ----------
+
+model Recommendation {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // SAVE | CAP | WARN | PLAN | INSIGHT | POSITIVE
+  kind       String
+  title      String
+  body       String
+  // LOW | MEDIUM | HIGH
+  severity   String   @default("MEDIUM")
+  // Optional structured payload (JSON)
+  payload    String?
+  dismissed  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// ---------- Notifications ----------
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String?
+  kind      String   @default("INFO") // INFO | WARNING | DUE | CELEBRATE
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, read])
+}
+
+// ---------- Import batches ----------
+//
+// Every row that arrives through the import pipeline OR through the opt-in
+// demo loader is tagged with an ImportBatch. This gives us:
+//   - per-batch undo ("remove this import")
+//   - a clear separation between DEMO data and the user's real data
+//   - provenance for imported rows (source bank, filename, date range)
+
+model ImportBatch {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // CSV | OFX | QFX | QIF | DEMO | MANUAL
+  kind          String   @default("CSV")
+  // Free-text label shown in the UI ("Chase Checking — Feb 2026").
+  label         String
+  // Friendly source name detected from the file ("Chase CSV", "Amex OFX"…).
+  source        String
+  // Original file name, if any.
+  filename      String?
+  rowCount      Int      @default(0)
+  skippedCount  Int      @default(0)
+  // ACTIVE | REVERTED
+  status        String   @default("ACTIVE")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  transactions Transaction[]
+
+  @@index([userId, createdAt])
+  @@index([userId, kind])
+}

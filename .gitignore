@@ -1,0 +1,17 @@
+node_modules
+.next
+out
+dist
+coverage
+.vercel
+.env
+.env*.local
+*.log
+*.tsbuildinfo
+.DS_Store
+.vscode
+.idea
+playwright-report
+test-results
+prisma/dev.db
+prisma/dev.db-journal
